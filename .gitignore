@@ -1,0 +1,13 @@
+# 忽略个人的数据库文件和配置文件
+dataset.json
+.snip_data.json
+.snip_config.json
+
+# 忽略 Python 运行时的缓存文件
+__pycache__/
+*.pyc
+
+# 忽略打包产生的文件夹
+build/
+dist/
+*.egg-info/
