@@ -11,13 +11,15 @@ from rich.syntax import Syntax
 from rich.table import Table
 
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 SCHEMA_VERSION = 2
 DEFAULT_LANGUAGE = "python"
+SORT_CHOICES = ("tag", "language", "updated")
 DEFAULT_DB_PATH = os.path.join(os.path.expanduser("~"), ".snip_data.json")
 CONFIG_FILE = os.path.join(os.path.expanduser("~"), ".snip_config.json")
 
 console = Console()
+error_console = Console(stderr=True)
 
 
 class SnipError(Exception):
@@ -178,6 +180,43 @@ def read_multiline_code():
     return "\n".join(lines)
 
 
+def read_code_from_file(path):
+    path = (path or "").strip()
+    if not path:
+        raise SnipError("文件路径不能为空。")
+    if not os.path.exists(path):
+        raise SnipError(f"文件不存在: {path}")
+    if not os.path.isfile(path):
+        raise SnipError(f"不是有效文件: {path}")
+
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            code = f.read()
+    except OSError as exc:
+        raise SnipError(f"无法读取文件: {path}") from exc
+
+    if code == "":
+        raise SnipError(f"文件内容为空: {path}")
+    return code
+
+
+def resolve_code_input(code=None, file_path=None, use_stdin=False):
+    sources = [code is not None, file_path is not None, use_stdin]
+    if sum(sources) > 1:
+        raise SnipError("--code、--file 和 --stdin 不能同时使用。")
+
+    if code is not None:
+        return code
+    if file_path is not None:
+        return read_code_from_file(file_path)
+    if use_stdin:
+        stdin_code = sys.stdin.read()
+        if stdin_code == "":
+            raise SnipError("标准输入内容为空。")
+        return stdin_code
+    return read_multiline_code()
+
+
 def should_overwrite(tag):
     answer = input(f"标签「{tag}」已存在，是否覆盖？[y/N]: ").strip().lower()
     return answer in {"y", "yes"}
@@ -203,6 +242,16 @@ def preview_text(text, max_length=40):
     return first_line[:max_length] + "..." if len(first_line) > max_length else first_line
 
 
+def sorted_snippet_items(snippets, sort_by="updated", reverse=False):
+    if sort_by == "tag":
+        key = lambda item: item[0].lower()
+    elif sort_by == "language":
+        key = lambda item: (item[1]["language"].lower(), item[0].lower())
+    else:
+        key = lambda item: (item[1]["updated_at"], item[0].lower())
+    return sorted(snippets.items(), key=key, reverse=reverse)
+
+
 def config_path(path=None):
     new_path = (path or input("请输入完整的数据文件路径，例如 D:\\data\\mysnips.json: ")).strip()
     if not new_path:
@@ -216,9 +265,16 @@ def config_path(path=None):
     console.print(f"配置完成，以后代码片段会保存到: {new_path}")
 
 
-def add_snippet(tag=None, language=DEFAULT_LANGUAGE, note=""):
+def add_snippet(
+    tag=None,
+    language=DEFAULT_LANGUAGE,
+    note="",
+    code=None,
+    file_path=None,
+    use_stdin=False,
+):
     tag = validate_tag(tag) if tag is not None else prompt_tag("请输入代码片段标签: ")
-    code = read_multiline_code()
+    snippet_code = resolve_code_input(code, file_path, use_stdin)
     data = load_data()
     snippets = get_snippets(data)
 
@@ -226,7 +282,7 @@ def add_snippet(tag=None, language=DEFAULT_LANGUAGE, note=""):
         console.print(f"已取消保存，标签「{tag}」保持不变。")
         return
 
-    snippets[tag] = make_snippet(code, language, note)
+    snippets[tag] = make_snippet(snippet_code, language, note)
     save_data(data)
     console.print(f"代码片段「{tag}」已保存。")
 
@@ -253,29 +309,36 @@ def edit_snippet(tag=None, language=None, note=None):
     console.print(f"代码片段「{tag}」已更新。")
 
 
-def find_snippet(tag=None):
+def find_snippet(tag=None, plain=False, line_numbers=True):
     tag = validate_tag(tag) if tag is not None else prompt_tag("请输入要查找的标签: ")
     data = load_data()
     snippets = get_snippets(data)
 
     if tag in snippets:
         snippet = snippets[tag]
+        if plain:
+            sys.stdout.write(snippet["code"])
+            if snippet["code"] and not snippet["code"].endswith("\n"):
+                sys.stdout.write("\n")
+            return
         console.print(f"\n[bold green]找到标签「{tag}」的代码：[/bold green]")
-        print_code(snippet["code"], snippet["language"])
+        print_code(snippet["code"], snippet["language"], line_numbers=line_numbers)
         if snippet["note"]:
             console.print(f"备注: {snippet['note']}")
         return
 
+    if plain:
+        raise SnipError(f"没有找到标签「{tag}」。")
     console.print(f"[bold red]没有找到标签「{tag}」。[/bold red]")
 
 
-def print_code(code, language):
+def print_code(code, language, line_numbers=True):
     try:
         syntax = Syntax(
             code,
             language or DEFAULT_LANGUAGE,
             theme="monokai",
-            line_numbers=True,
+            line_numbers=line_numbers,
         )
         console.print(syntax)
     except Exception:
@@ -293,7 +356,7 @@ def add_snippet_row(table, index, tag, snippet):
     )
 
 
-def list_snippet(language=None):
+def list_snippet(language=None, sort_by="updated", reverse=False):
     data = load_data()
     snippets = get_snippets(data)
 
@@ -316,13 +379,16 @@ def list_snippet(language=None):
     table.add_column("预览", style="green")
     table.add_column("更新时间", style="magenta")
 
-    for index, (tag, snippet) in enumerate(snippets.items(), 1):
+    for index, (tag, snippet) in enumerate(
+        sorted_snippet_items(snippets, sort_by, reverse),
+        1,
+    ):
         add_snippet_row(table, index, tag, snippet)
 
     console.print(table)
 
 
-def search_snippet(keyword):
+def search_snippet(keyword, language=None):
     keyword = (keyword or "").strip()
     if not keyword:
         raise SnipError("搜索关键字不能为空。")
@@ -331,6 +397,8 @@ def search_snippet(keyword):
     matched = []
     lowered = keyword.lower()
     for tag, snippet in get_snippets(data).items():
+        if language and snippet["language"] != language:
+            continue
         haystack = "\n".join([tag, snippet["note"], snippet["code"]]).lower()
         if lowered in haystack:
             matched.append((tag, snippet))
@@ -365,6 +433,32 @@ def delete_snippet(tag=None):
     del snippets[tag]
     save_data(data)
     console.print(f"代码片段「{tag}」已删除。")
+
+
+def rename_snippet(old_tag, new_tag, overwrite=False):
+    old_tag = validate_tag(old_tag)
+    new_tag = validate_tag(new_tag)
+    if old_tag == new_tag:
+        raise SnipError("新旧标签不能相同。")
+
+    data = load_data()
+    snippets = get_snippets(data)
+    if old_tag not in snippets:
+        raise SnipError(f"标签「{old_tag}」不存在。")
+    if new_tag in snippets and not overwrite:
+        raise SnipError(f"标签「{new_tag}」已存在，请使用 --overwrite 覆盖。")
+
+    snippet = copy.deepcopy(snippets[old_tag])
+    snippet["updated_at"] = now_iso()
+    del snippets[old_tag]
+    snippets[new_tag] = normalize_snippet(snippet)
+    save_data(data)
+    console.print(f"标签「{old_tag}」已重命名为「{new_tag}」。")
+
+
+def show_paths():
+    console.print(f"数据库路径: {get_db_path()}")
+    console.print(f"配置文件路径: {CONFIG_FILE}")
 
 
 def export_snippets(path):
@@ -411,12 +505,23 @@ def build_parser():
     add_parser.add_argument("tag", nargs="?", help="代码片段标签")
     add_parser.add_argument("--lang", default=DEFAULT_LANGUAGE, help="代码语言，默认 python")
     add_parser.add_argument("--note", default="", help="备注")
+    add_parser.add_argument("--code", help="直接保存参数中的代码")
+    add_parser.add_argument("--file", dest="file_path", help="从文件读取代码内容")
+    add_parser.add_argument("--stdin", action="store_true", help="从标准输入读取代码内容")
 
     list_parser = subparsers.add_parser("list", help="查看所有代码片段")
     list_parser.add_argument("--lang", help="只显示指定语言的代码片段")
+    list_parser.add_argument("--sort", choices=SORT_CHOICES, default="updated", help="排序字段")
+    list_parser.add_argument("--reverse", action="store_true", help="反向排序")
 
     find_parser = subparsers.add_parser("find", help="按标签查找代码片段")
     find_parser.add_argument("tag", nargs="?", help="要查找的标签")
+    find_parser.add_argument("--plain", action="store_true", help="只输出代码内容")
+    find_parser.add_argument(
+        "--no-line-numbers",
+        action="store_true",
+        help="隐藏语法高亮中的行号",
+    )
 
     edit_parser = subparsers.add_parser("edit", help="编辑已有代码片段")
     edit_parser.add_argument("tag", nargs="?", help="要编辑的标签")
@@ -425,12 +530,20 @@ def build_parser():
 
     search_parser = subparsers.add_parser("search", help="搜索标签、备注和代码内容")
     search_parser.add_argument("keyword", help="搜索关键字")
+    search_parser.add_argument("--lang", help="只搜索指定语言的代码片段")
 
     delete_parser = subparsers.add_parser("delete", help="按标签删除代码片段")
     delete_parser.add_argument("tag", nargs="?", help="要删除的标签")
 
+    rename_parser = subparsers.add_parser("rename", help="重命名代码片段标签")
+    rename_parser.add_argument("old_tag", help="旧标签")
+    rename_parser.add_argument("new_tag", help="新标签")
+    rename_parser.add_argument("--overwrite", action="store_true", help="覆盖已有新标签")
+
     config_parser = subparsers.add_parser("config", help="设置本地数据库保存路径")
     config_parser.add_argument("path", nargs="?", help="JSON 数据文件路径")
+
+    subparsers.add_parser("path", help="查看数据库和配置文件路径")
 
     export_parser = subparsers.add_parser("export", help="导出数据库为 JSON")
     export_parser.add_argument("path", help="导出文件路径")
@@ -454,23 +567,27 @@ def main(argv=None):
         if args.command == "config":
             config_path(args.path)
         elif args.command == "add":
-            add_snippet(args.tag, args.lang, args.note)
+            add_snippet(args.tag, args.lang, args.note, args.code, args.file_path, args.stdin)
         elif args.command == "find":
-            find_snippet(args.tag)
+            find_snippet(args.tag, args.plain, not args.no_line_numbers)
         elif args.command == "edit":
             edit_snippet(args.tag, args.lang, args.note)
         elif args.command == "search":
-            search_snippet(args.keyword)
+            search_snippet(args.keyword, args.lang)
         elif args.command == "list":
-            list_snippet(args.lang)
+            list_snippet(args.lang, args.sort, args.reverse)
         elif args.command == "delete":
             delete_snippet(args.tag)
+        elif args.command == "rename":
+            rename_snippet(args.old_tag, args.new_tag, args.overwrite)
+        elif args.command == "path":
+            show_paths()
         elif args.command == "export":
             export_snippets(args.path)
         elif args.command == "import":
             import_snippets(args.path, args.overwrite)
     except SnipError as exc:
-        console.print(f"[bold red]{exc}[/bold red]")
+        error_console.print(f"[bold red]{exc}[/bold red]")
         return 1
 
     return 0

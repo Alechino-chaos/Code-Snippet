@@ -23,6 +23,7 @@ class SnipTestCase(unittest.TestCase):
             patch.object(main, "DEFAULT_DB_PATH", self.db_path),
             patch.object(main, "CONFIG_FILE", self.config_path),
             patch.object(main, "console", Console(file=StringIO(), force_terminal=False)),
+            patch.object(main, "error_console", Console(file=StringIO(), force_terminal=False)),
             patch.object(main, "save_json_atomic", self.write_json_atomic),
         ]
         for patcher in patches:
@@ -121,6 +122,42 @@ class SnipTestCase(unittest.TestCase):
             main.add_snippet("demo", language="python", note="hello")
 
         self.assert_v2_snippet(self.read_db(), "demo", "print('hi')", "python", "hello")
+
+    def test_add_snippet_saves_code_argument(self):
+        main.add_snippet("demo", code="print('hi')")
+
+        self.assert_v2_snippet(self.read_db(), "demo", "print('hi')")
+
+    def test_add_snippet_reads_file(self):
+        source_path = os.path.join(self.temp_dir, "source.py")
+        with open(source_path, "w", encoding="utf-8") as f:
+            f.write("print('from file')")
+
+        main.add_snippet("demo", file_path=source_path)
+
+        self.assert_v2_snippet(self.read_db(), "demo", "print('from file')")
+
+    def test_add_snippet_reads_stdin(self):
+        with patch("sys.stdin", StringIO("print('from stdin')")):
+            main.add_snippet("demo", use_stdin=True)
+
+        self.assert_v2_snippet(self.read_db(), "demo", "print('from stdin')")
+
+    def test_add_snippet_rejects_multiple_input_sources(self):
+        with self.assertRaises(main.SnipError):
+            main.add_snippet("demo", code="x", file_path="x.py")
+
+    def test_add_snippet_rejects_missing_file(self):
+        with self.assertRaises(main.SnipError):
+            main.add_snippet("demo", file_path=os.path.join(self.temp_dir, "missing.py"))
+
+    def test_add_snippet_rejects_empty_file(self):
+        source_path = os.path.join(self.temp_dir, "empty.py")
+        with open(source_path, "w", encoding="utf-8"):
+            pass
+
+        with self.assertRaises(main.SnipError):
+            main.add_snippet("demo", file_path=source_path)
 
     def test_add_snippet_refuses_empty_tag(self):
         with self.assertRaises(main.SnipError):
@@ -281,15 +318,163 @@ class SnipTestCase(unittest.TestCase):
 
         main.find_snippet("demo")
 
+    def test_find_plain_outputs_only_code(self):
+        self.write_db({"demo": "print('hi')"})
+        stdout = StringIO()
+
+        with patch("sys.stdout", stdout):
+            main.find_snippet("demo", plain=True)
+
+        self.assertEqual(stdout.getvalue(), "print('hi')\n")
+
+    def test_find_plain_missing_tag_keeps_stdout_clean(self):
+        stdout = StringIO()
+        with patch("sys.stdout", stdout):
+            result = main.main(["find", "missing", "--plain"])
+
+        self.assertEqual(result, 1)
+        self.assertEqual(stdout.getvalue(), "")
+
+    def test_find_no_line_numbers_does_not_raise(self):
+        self.write_db({"demo": "print('hi')"})
+
+        main.find_snippet("demo", line_numbers=False)
+
+    def test_show_paths_prints_db_and_config_paths(self):
+        output = StringIO()
+        with patch.object(main, "console", Console(file=output, force_terminal=False, width=200)):
+            main.show_paths()
+
+        text = output.getvalue()
+        self.assertIn(self.db_path, text)
+        self.assertIn(self.config_path, text)
+
+    def test_list_sorts_by_tag(self):
+        self.write_db(
+            {
+                "__schema_version": 2,
+                "snippets": {
+                    "b": main.make_snippet("b", timestamp="2026-07-08T18:00:00"),
+                    "a": main.make_snippet("a", timestamp="2026-07-08T19:00:00"),
+                },
+            }
+        )
+
+        with patch.object(main, "add_snippet_row") as add_row:
+            main.list_snippet(sort_by="tag")
+
+        self.assertEqual([call.args[2] for call in add_row.call_args_list], ["a", "b"])
+
+    def test_list_sorts_by_language(self):
+        self.write_db(
+            {
+                "__schema_version": 2,
+                "snippets": {
+                    "py": main.make_snippet("py", language="python"),
+                    "js": main.make_snippet("js", language="javascript"),
+                },
+            }
+        )
+
+        with patch.object(main, "add_snippet_row") as add_row:
+            main.list_snippet(sort_by="language")
+
+        self.assertEqual([call.args[2] for call in add_row.call_args_list], ["js", "py"])
+
+    def test_list_sorts_by_updated_and_reverse(self):
+        self.write_db(
+            {
+                "__schema_version": 2,
+                "snippets": {
+                    "old": main.make_snippet("old", timestamp="2026-07-08T18:00:00"),
+                    "new": main.make_snippet("new", timestamp="2026-07-08T19:00:00"),
+                },
+            }
+        )
+
+        with patch.object(main, "add_snippet_row") as add_row:
+            main.list_snippet(sort_by="updated", reverse=True)
+
+        self.assertEqual([call.args[2] for call in add_row.call_args_list], ["new", "old"])
+
+    def test_search_filters_by_language(self):
+        self.write_db(
+            {
+                "__schema_version": 2,
+                "snippets": {
+                    "py": main.make_snippet("print('match')", language="python"),
+                    "js": main.make_snippet("console.log('match')", language="javascript"),
+                },
+            }
+        )
+
+        with patch.object(main, "add_snippet_row") as add_row:
+            main.search_snippet("match", language="javascript")
+
+        self.assertEqual(add_row.call_count, 1)
+        self.assertEqual(add_row.call_args.args[2], "js")
+
+    def test_rename_preserves_metadata_and_updates_timestamp(self):
+        self.write_db(
+            {
+                "__schema_version": 2,
+                "snippets": {
+                    "old": {
+                        "code": "print('hi')",
+                        "language": "python",
+                        "note": "demo",
+                        "created_at": "2026-07-08T18:00:00",
+                        "updated_at": "2026-07-08T18:00:00",
+                    }
+                },
+            }
+        )
+
+        with patch.object(main, "now_iso", return_value="2026-07-08T19:00:00"):
+            main.rename_snippet("old", "new")
+
+        data = self.read_db()
+        self.assertNotIn("old", data["snippets"])
+        self.assertEqual(data["snippets"]["new"]["code"], "print('hi')")
+        self.assertEqual(data["snippets"]["new"]["created_at"], "2026-07-08T18:00:00")
+        self.assertEqual(data["snippets"]["new"]["updated_at"], "2026-07-08T19:00:00")
+
+    def test_rename_refuses_existing_tag_by_default(self):
+        self.write_db({"old": "old code", "new": "new code"})
+
+        with self.assertRaises(main.SnipError):
+            main.rename_snippet("old", "new")
+
+    def test_rename_overwrites_existing_tag_when_requested(self):
+        self.write_db({"old": "old code", "new": "new code"})
+
+        main.rename_snippet("old", "new", overwrite=True)
+
+        data = self.read_db()
+        self.assertNotIn("old", data["snippets"])
+        self.assert_v2_snippet(data, "new", "old code")
+
     def test_argparse_commands_accept_shortcut_arguments(self):
         parser = main.build_parser()
 
         self.assertEqual(parser.parse_args(["find", "demo"]).tag, "demo")
+        self.assertTrue(parser.parse_args(["find", "demo", "--plain"]).plain)
+        self.assertTrue(parser.parse_args(["find", "demo", "--no-line-numbers"]).no_line_numbers)
         self.assertEqual(parser.parse_args(["delete", "demo"]).tag, "demo")
         self.assertEqual(parser.parse_args(["add", "demo"]).tag, "demo")
+        self.assertEqual(parser.parse_args(["add", "demo", "--code", "x"]).code, "x")
+        self.assertEqual(parser.parse_args(["add", "demo", "--file", "x.py"]).file_path, "x.py")
+        self.assertTrue(parser.parse_args(["add", "demo", "--stdin"]).stdin)
         self.assertEqual(parser.parse_args(["edit", "demo"]).tag, "demo")
         self.assertEqual(parser.parse_args(["search", "demo"]).keyword, "demo")
+        self.assertEqual(parser.parse_args(["search", "demo", "--lang", "python"]).lang, "python")
         self.assertEqual(parser.parse_args(["list", "--lang", "python"]).lang, "python")
+        self.assertEqual(parser.parse_args(["list", "--sort", "tag"]).sort, "tag")
+        self.assertTrue(parser.parse_args(["list", "--reverse"]).reverse)
+        self.assertEqual(parser.parse_args(["rename", "old", "new"]).old_tag, "old")
+        self.assertEqual(parser.parse_args(["rename", "old", "new"]).new_tag, "new")
+        self.assertTrue(parser.parse_args(["rename", "old", "new", "--overwrite"]).overwrite)
+        self.assertEqual(parser.parse_args(["path"]).command, "path")
         self.assertEqual(parser.parse_args(["config", self.db_path]).path, self.db_path)
         self.assertEqual(parser.parse_args(["export", self.db_path]).path, self.db_path)
         self.assertEqual(parser.parse_args(["import", self.db_path]).path, self.db_path)

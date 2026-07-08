@@ -9,6 +9,7 @@
 - ⌨️ **多行录入**：完美支持一键粘贴多行代码，输入 `END` 即可保存。
 - ⚙️ **高度自定义**：支持用户自定义本地数据库的存储路径。
 - 🔎 **更好检索**：支持语言、备注、内容搜索、导入导出和编辑已有片段。
+- 🧩 **脚本友好**：支持参数、文件和标准输入录入，也支持纯代码输出。
 
 ## 🛠️ 快速开始
 
@@ -37,34 +38,44 @@ snip --version
 snip add
 snip add demo
 snip add demo --lang python --note "常用打印示例"
+snip add demo --code "print('hello')"
+snip add demo --file demo.py
+Get-Content demo.py | snip add demo --stdin
 ```
 
-按提示粘贴多行代码，单独输入一行 `END` 保存。如果标签已存在，会询问是否覆盖，默认不覆盖。
+不传 `--code`、`--file` 或 `--stdin` 时，会进入交互式多行录入，单独输入一行 `END` 保存。三种非交互录入方式不能同时使用。如果标签已存在，会询问是否覆盖，默认不覆盖。
 
 📋 2. **查看库存**
 
 ```bash
 snip list
 snip list --lang python
+snip list --sort tag
+snip list --sort updated --reverse
 ```
+
+支持按 `tag`、`language`、`updated` 排序，默认按 `updated` 排序。
 
 🔍 3. **查找片段**
 
 ```bash
 snip find
 snip find demo
+snip find demo --plain
+snip find demo --no-line-numbers
 ```
 
-`snip find` 会根据片段保存的 `language` 字段进行语法高亮。
+`snip find` 会根据片段保存的 `language` 字段进行语法高亮。`--plain` 只输出代码内容，适合复制、重定向或脚本调用。
 
 🔎 4. **搜索片段**
 
 ```bash
 snip search demo
 snip search requests
+snip search requests --lang python
 ```
 
-搜索范围包括标签、备注和代码内容。
+搜索范围包括标签、备注和代码内容，也可以用 `--lang` 限定语言。
 
 ✏️ 5. **编辑片段**
 
@@ -75,21 +86,31 @@ snip edit demo --lang javascript --note "浏览器调试版本"
 
 编辑时会重新录入代码内容，并更新 `updated_at`。
 
-🗑️ 6. **删除片段**
+🏷️ 6. **重命名片段**
+
+```bash
+snip rename old-tag new-tag
+snip rename old-tag new-tag --overwrite
+```
+
+默认不会覆盖已有的新标签；加上 `--overwrite` 才会覆盖。
+
+🗑️ 7. **删除片段**
 
 ```bash
 snip delete
 snip delete demo
 ```
 
-⚙️ 7. **自定义存储路径**
+⚙️ 8. **查看和自定义存储路径**
 
 ```bash
+snip path
 snip config
 snip config D:\data\mysnips.json
 ```
 
-📤 8. **导入导出**
+📤 9. **导入导出**
 
 ```bash
 snip export D:\backup\snips.json
